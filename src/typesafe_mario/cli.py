@@ -8,6 +8,16 @@ from pathlib import Path
 from .policy import HeuristicPolicy, TypeSafePolicy
 from .runner import run_episode
 from .state import MarioStateParser
+from .train.config import BACKEND_HELP, BACKENDS, RewardConfig
+
+LEVELS_HELP = (
+    "Comma-separated levels drawn at random each episode, e.g. 1-1,2-1,3-1 "
+    "(retro backend only; it ships save-states for 1-1, 1-4, 2-1 and 3-1 to 8-1)"
+)
+
+
+def _levels(text: str) -> tuple[str, ...]:
+    return tuple(part.strip() for part in text.split(",") if part.strip())
 
 
 def _demo_ram() -> bytearray:
@@ -82,11 +92,97 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Save the first populated dashboard frame as a PNG",
     )
+    train = subparsers.add_parser("train", help="Train the MLP policy with PPO")
+    train.add_argument("--steps", type=int, default=2_000_000, help="Total decisions to train")
+    train.add_argument("--envs", type=int, default=8)
+    train.add_argument("--seed", type=int, default=0)
+    train.add_argument("--backend", choices=BACKENDS, default="nes-py", help=BACKEND_HELP)
+    train.add_argument("--levels", type=_levels, default=(), help=LEVELS_HELP)
+    train.add_argument("--out", type=Path, default=Path("artifacts/train"))
+    defaults = RewardConfig()
+    train.add_argument(
+        "--progress-scale",
+        type=float,
+        default=defaults.progress_scale,
+        help="Reward = pixels moved right / this value",
+    )
+    train.add_argument(
+        "--time-penalty",
+        type=float,
+        default=defaults.time_penalty,
+        help="Penalty charged per 4 emulator frames",
+    )
+    train.add_argument(
+        "--stall-penalty",
+        type=float,
+        default=defaults.stall_penalty,
+        help="Penalty per 4 frames without new progress",
+    )
+    train.add_argument("--death-penalty", type=float, default=defaults.death_penalty)
+    train.add_argument("--flag-bonus", type=float, default=defaults.flag_bonus)
+    train.add_argument(
+        "--stall-limit",
+        type=int,
+        default=defaults.stall_limit,
+        help="4-frame steps without new progress before the episode is cut",
+    )
+
+    evaluate = subparsers.add_parser("eval", help="Run a trained policy without the API")
+    evaluate.add_argument("--checkpoint", type=Path, default=Path("artifacts/train/policy.pt"))
+    evaluate.add_argument("--episodes", type=int, default=5)
+    evaluate.add_argument("--render", action="store_true", help="Open a live game window")
+    evaluate.add_argument("--backend", choices=BACKENDS, default="nes-py", help=BACKEND_HELP)
+    evaluate.add_argument("--levels", type=_levels, default=(), help=LEVELS_HELP)
+
+    watch = subparsers.add_parser("watch", help="Live window replaying the latest checkpoint")
+    watch.add_argument("--checkpoint", type=Path, default=Path("artifacts/train/policy.pt"))
+    watch.add_argument("--greedy", action="store_true", help="Pick the top action, not sample")
+    watch.add_argument("--backend", choices=BACKENDS, default="nes-py", help=BACKEND_HELP)
+
+    plot = subparsers.add_parser("plot", help="Serve training curves in the browser")
+    plot.add_argument("--root", type=Path, default=Path("artifacts"))
+    plot.add_argument("--port", type=int, default=8765)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "train":
+        from .train.ppo import train
+
+        checkpoint = train(
+            total_steps=args.steps,
+            out_dir=args.out,
+            reward=RewardConfig(
+                progress_scale=args.progress_scale,
+                time_penalty=args.time_penalty,
+                stall_penalty=args.stall_penalty,
+                death_penalty=args.death_penalty,
+                flag_bonus=args.flag_bonus,
+                stall_limit=args.stall_limit,
+            ),
+            n_envs=args.envs,
+            seed=args.seed,
+            backend=args.backend,
+            levels=args.levels,
+        )
+        print(f"Checkpoint: {checkpoint.resolve()}")
+        return 0
+    if args.command == "watch":
+        from .train.watch import watch
+
+        watch(args.checkpoint, greedy=args.greedy, backend=args.backend)
+        return 0
+    if args.command == "plot":
+        from .train.plot import serve
+
+        serve(args.root, args.port)
+        return 0
+    if args.command == "eval":
+        from .train.ppo import evaluate
+
+        evaluate(args.checkpoint, args.episodes, args.render, args.backend, args.levels)
+        return 0
     if args.command == "state-demo":
         return state_demo()
     if args.command == "play":

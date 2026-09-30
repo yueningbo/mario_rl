@@ -20,6 +20,9 @@ mario = [
   "numpy>=2.1",
   "pygame>=2.6",
 ]
+train = [
+  "torch>=2.4",
+]
 dev = [
   "pytest>=8",
   "ruff>=0.9",
